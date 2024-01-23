@@ -1,0 +1,88 @@
+using System;
+using System.IO;
+using System.Net.Sockets;
+
+public class Client
+{
+    private static int clientPort = 8080;
+
+    public static void Main()
+    {
+        try
+        {
+            TcpClient client = new TcpClient("127.0.0.1", clientPort);
+            NetworkStream stream = client.GetStream();
+            StreamReader reader = new StreamReader(stream);
+            StreamWriter writer = new StreamWriter(stream) { AutoFlush = true };
+
+            string welcomeMessage = reader.ReadLine();
+            Console.WriteLine($"Server: {welcomeMessage}");
+
+            bool waitingForPassword = false;
+            int targetClientId = -1;
+
+            while (true)
+            {
+                Console.Write("Enter a command: ");
+                string userCommand = Console.ReadLine();
+
+                writer.WriteLine(userCommand);
+
+                if (waitingForPassword)
+                {
+                    Console.Write("Enter password: ");
+                    string enteredPassword = Console.ReadLine();
+
+                    // Send the entered password and target client ID to the server
+                    writer.WriteLine($"{enteredPassword} {targetClientId}");
+
+                    // Receive the server response after entering the password
+                    string response = reader.ReadLine();
+
+                    if (response == "Password matched. You can now enter new commands.")
+                    {
+                        Console.Clear(); // Clear the console screen
+                        waitingForPassword = false;
+
+                        // Continue the loop to receive further commands
+                        continue;
+                    }
+                    else
+                    {
+                        Console.WriteLine("Incorrect password. Exiting client.");
+                        break;
+                    }
+                }
+                else
+                {
+                    // Handle other server responses
+                    string response = reader.ReadLine();
+                    Console.WriteLine($"Server response: {response}");
+
+                    if (userCommand.ToLower() == "ok")
+                    {
+                        Console.Clear(); // Clear the console screen
+                        waitingForPassword = true;
+
+                        Console.Write("Enter target client ID: ");
+                        if (int.TryParse(Console.ReadLine(), out targetClientId))
+                        {
+                            // Continue the loop to receive password
+                            continue;
+                        }
+                        else
+                        {
+                            Console.WriteLine("Invalid target client ID. Exiting client.");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        catch (IOException ex)
+        {
+            Console.WriteLine($"Problem with server communication: {ex.Message}. Exiting client.");
+        }
+    }
+}
+
