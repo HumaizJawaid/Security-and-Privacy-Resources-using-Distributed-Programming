@@ -1,0 +1,244 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+
+public class Server
+{
+    private static Dictionary<int, List<string>> clientPasswords = new Dictionary<int, List<string>>();
+    private static int clientCount = 0;
+    private static object lockObject = new object();
+    private static bool isFirstClientConnected = false;
+    private static int masterNodeID = -1;
+    private static TcpClient masterNodeClient = null;
+    private static string masterNodePassword = "pndc";
+    private static bool isMasterNodeAuthenticated = false;
+
+    private static void ProcessClientRequests(object argument)
+    {
+        TcpClient client = (TcpClient)argument;
+        int clientid = Interlocked.Increment(ref clientCount);
+
+        try
+        {
+            NetworkStream stream = client.GetStream();
+            StreamReader reader = new StreamReader(stream);
+            StreamWriter writer = new StreamWriter(stream) { AutoFlush = true };
+
+            lock (lockObject)
+            {
+                if (!isFirstClientConnected)
+                {
+                    isFirstClientConnected = true;
+                    masterNodeID = clientid;
+                    masterNodeClient = client; // Store the master node client for communication
+                    Console.WriteLine($"Client {clientid} connected as Master Node.");
+                    // Send a welcome message to the master node
+                    writer.WriteLine($"Hello Master Node {clientid}! Please enter the password to proceed:");
+                }
+                else
+                {
+                    Console.WriteLine($"Client {clientid} connected.");
+                    // Send a message to non-master node clients
+                    writer.WriteLine($"Client {clientid} You are not the Master Node. Communication is restricted.");
+                }
+            }
+
+            while (true)
+            {
+                string clientResponse = reader.ReadLine();
+
+                Console.WriteLine($"Response from Client {clientid}: {clientResponse}");
+
+                lock (lockObject)
+                {
+                    if (clientid == masterNodeID)
+                    {
+                        // Process master node requests here
+                        if (!isMasterNodeAuthenticated)
+                        {
+                            // Authenticate the master node with the entered password
+                            string enteredPassword = clientResponse.ToLower();
+                            if (enteredPassword == masterNodePassword)
+                            {
+                                isMasterNodeAuthenticated = true;
+                                Console.WriteLine($"Master Node {clientid} authenticated. You can now execute commands.");
+                                // Send a welcome message to the master node
+                                writer.WriteLine("Welcome, Master Node! You are now authenticated.");
+                            }
+                            else if (enteredPassword != masterNodePassword)
+                            {
+                                Console.WriteLine($"Incorrect password entered by Master Node {clientid}.");
+                                // Send an error message to the master node
+                                writer.WriteLine("Incorrect password. Access denied.");
+                                return; // Exit the thread for non-authenticated master nodes
+                            }
+                        }
+
+                        if (clientResponse.ToLower().StartsWith($"generate password for client"))
+                        {
+                            int requestedClientID;
+                            if (int.TryParse(clientResponse.Split(' ').Last(), out requestedClientID))
+                            {
+                                GeneratePasswords(1, 8, requestedClientID);
+                                Console.WriteLine($"Generated password for Client {requestedClientID}.");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Invalid request format from Master Node: {clientResponse}");
+                            }
+                        }
+                        else if (clientResponse.ToLower().StartsWith($"send password for client"))
+                        {
+                            int requestedClientID;
+                            if (int.TryParse(clientResponse.Split(' ').Last(), out requestedClientID))
+                            {
+                                // Send password to the requested client
+                                SendPasswordToClient(writer, requestedClientID);
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Invalid request format from Master Node: {clientResponse}");
+                            }
+                        }
+                        // Add more conditions for master node requests here
+                    }
+                    else
+                    {
+                        // Non-master node requests
+                        if (clientResponse.ToLower() == "send password")
+                        {
+                            if (clientPasswords.ContainsKey(clientid))
+                            {
+                                // Send password to the requesting client
+                                SendPasswordToClient(writer, clientid);
+                            }
+                            else
+                            {
+                                writer.WriteLine("Password not generated for this client. Please request a password first.");
+                            }
+                        }
+                        // Add more conditions for non-master node requests here
+                    }
+                }
+
+                // Send a response back to the client
+                writer.WriteLine($"Server received: {clientResponse}");
+            }
+        }
+        catch (IOException ex)
+        {
+            Console.WriteLine($"Problem with Client {clientid} communication: {ex.Message}. Exiting thread.");
+        }
+        finally
+        {
+            if (client != null)
+            {
+                client.Close();
+            }
+        }
+    }
+
+    private static void SendPasswordToMasterNode(StreamWriter writer, int clientid)
+    {
+        if (clientPasswords.ContainsKey(clientid))
+        {
+            List<string> passwords = clientPasswords[clientid];
+            writer.WriteLine($"Password for Client {clientid}: {string.Join(", ", passwords)}");
+        }
+        else
+        {
+            writer.WriteLine($"Password for Client {clientid} not generated yet. Please wait.");
+        }
+    }
+
+    private static void GeneratePasswords(int count, int length, int clientid)
+    {
+        List<string> passwords = new List<string>();
+        Random random = new Random();
+
+        for (int i = 0; i < count; i++)
+        {
+            string password;
+            do
+            {
+                // Generate a random alphanumeric password with the specified length
+                password = new string(Enumerable.Repeat("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", length)
+                    .Select(s => s[random.Next(s.Length)]).ToArray());
+            } while (passwords.Contains(password)); // Ensure uniqueness
+
+            passwords.Add(password);
+        }
+
+        // Assign the generated passwords to the respective client
+        clientPasswords[clientid] = passwords;
+
+        // Display generated passwords on the server's console
+        Console.WriteLine($"Client {clientid} Password Set: {string.Join(", ", passwords)}");
+
+        // Signal waiting threads that new passwords are available
+        Monitor.PulseAll(lockObject);
+    }
+
+    private static void ForwardRequestToMasterNode(int clientid, string request)
+    {
+        if (masterNodeClient != null)
+        {
+            NetworkStream stream = masterNodeClient.GetStream();
+            StreamWriter masterNodeWriter = new StreamWriter(stream) { AutoFlush = true };
+
+            // Forward the request to the master node
+            masterNodeWriter.WriteLine($"Client {clientid} requests: {request}");
+        }
+        else
+        {
+            Console.WriteLine("Master Node not available. Cannot forward request.");
+        }
+    }
+
+    private static void SendPasswordToClient(StreamWriter writer, int clientid)
+    {
+        if (clientPasswords.ContainsKey(clientid))
+        {
+            List<string> passwords = clientPasswords[clientid];
+            writer.WriteLine($"Password for Client {clientid}: {string.Join(", ", passwords)}");
+        }
+        else
+        {
+            writer.WriteLine($"Password for Client {clientid} not generated yet. Please wait.");
+        }
+    }
+
+    public static void Main()
+    {
+        TcpListener listener = null;
+        try
+        {
+            listener = new TcpListener(IPAddress.Parse("127.0.0.1"), 8080);
+            listener.Start();
+            Console.WriteLine("Server is waiting for the clients...");
+
+            while (true)
+            {
+                TcpClient manager = listener.AcceptTcpClient();
+                Thread t = new Thread(ProcessClientRequests);
+                t.Start(manager);
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+        }
+        finally
+        {
+            if (listener != null)
+            {
+                listener.Stop();
+            }
+        }
+    }
+}
+
